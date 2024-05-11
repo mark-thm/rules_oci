@@ -1,0 +1,65 @@
+load("@aspect_bazel_lib//lib:run_binary.bzl", "run_binary")
+load("@container_structure_test//:defs.bzl", "container_structure_test")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_tarball")
+
+alias(
+    name = "buildx",
+    actual = select({
+        "@bazel_tools//src/conditions:linux_x86_64": "@buildx_linux_amd64//file",
+        "@bazel_tools//src/conditions:darwin_arm64": "@buildx_darwin_arm64//file",
+        "@bazel_tools//src/conditions:darwin_x86_64": "@buildx_darwin_amd64//file",
+    }),
+)
+
+# Build a tarball from the Dockerfile
+genrule(
+    name = "dockerfile_build",
+    srcs = ["Dockerfile"] + glob(["src/*"]),
+    outs = ["dockerfile_base.tar"],
+    cmd = """
+$(location :buildx) build $$(dirname $(location Dockerfile)) --output=type=docker,name=myimage:latest
+docker save myimage:latest > $@  
+""",
+    local = True,  # needs docker to build
+    output_to_bindir = True,
+    tags = [],
+    tools = [":buildx"],
+)
+
+# Convert tarball to an oci_image base
+genrule(
+    name = "regctl_gen",
+    outs = ["regctl.sh"],
+    cmd = "echo '$(REGCTL_BIN) $$@' >> $@",
+    toolchains = ["@oci_regctl_toolchains//:current_toolchain"],
+)
+
+run_binary(
+    name = "base",
+    srcs = ["dockerfile_base.tar"] + ["@oci_regctl_toolchains//:current_toolchain"],
+    args = [
+        "image",
+        "import",
+        "ocidir://$@",
+        "$(location :dockerfile_base.tar)",
+    ],
+    out_dirs = ["base"],
+    tool = "regctl.sh",
+)
+
+oci_image(
+    name = "image",
+    base = ":base",
+)
+
+oci_tarball(
+    name = "tar",
+    image = ":image",
+    repo_tags = [],
+)
+
+container_structure_test(
+    name = "test",
+    configs = ["test.yaml"],
+    image = ":image",
+)
